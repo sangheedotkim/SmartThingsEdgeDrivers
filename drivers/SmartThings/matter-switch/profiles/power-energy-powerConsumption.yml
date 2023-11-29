@@ -10,6 +10,8 @@ components:
     version: 1
   - id: powerConsumptionReport
     version: 1
+  - id: scalebrook41259.bypassRoute
+    version: 1
   - id: firmwareUpdate
     version: 1
   - id: refresh
