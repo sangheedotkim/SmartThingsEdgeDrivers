@@ -59,6 +59,7 @@ local SOLAR_POWER_DEVICE_TYPE_ID = 0x0017
 local BATTERY_STORAGE_DEVICE_TYPE_ID = 0x0018
 local ELECTRICAL_SENSOR_DEVICE_TYPE_ID = 0x0510
 local DEVICE_ENERGY_MANAGEMENT_DEVICE_TYPE_ID = 0x050D
+local ELECTRICAL_METER_DEVICE_TYPE_ID = 0x0514
 
 local function get_endpoints_for_dt(device, device_type)
   local endpoints = {}
@@ -77,10 +78,13 @@ end
 local find_default_endpoint = function(device)
   local evse_eps = get_endpoints_for_dt(device, EVSE_DEVICE_TYPE_ID) or {}
   local solar_power_eps = get_endpoints_for_dt(device, SOLAR_POWER_DEVICE_TYPE_ID) or {}
+  local electrical_meter_eps = get_endpoints_for_dt(device, ELECTRICAL_METER_DEVICE_TYPE_ID) or {}
   if #evse_eps > 0 then
     return evse_eps[1]
   elseif #solar_power_eps > 0 then
     return solar_power_eps[1]
+  elseif #electrical_meter_eps > 0 then
+    return electrical_meter_eps[1]
   end
   return device.MATTER_DEFAULT_ENDPOINT
 end
@@ -256,11 +260,14 @@ end
 
 local function do_configure(driver, device)
   local evse_eps = get_endpoints_for_dt(device, EVSE_DEVICE_TYPE_ID) or {}
+  local electrical_meter_eps = get_endpoints_for_dt(device, ELECTRICAL_METER_DEVICE_TYPE_ID) or {}
+  local profile_name
+
   if #evse_eps > 0 then
     local power_meas_eps = embedded_cluster_utils.get_endpoints(device, clusters.ElectricalPowerMeasurement.ID) or {}
     local energy_meas_eps = embedded_cluster_utils.get_endpoints(device, clusters.ElectricalEnergyMeasurement.ID) or {}
     local device_energy_mgmt_eps = embedded_cluster_utils.get_endpoints(device, clusters.DeviceEnergyManagementMode) or {}
-    local profile_name = "evse"
+    profile_name = "evse"
 
     -- As per spec, at least one of the electrical energy measurement or electrical power measurement clusters are to be supported.
     if #energy_meas_eps > 0 then
@@ -273,7 +280,11 @@ local function do_configure(driver, device)
     if #device_energy_mgmt_eps > 0 then
       profile_name = profile_name .. "-energy-mgmt-mode"
     end
+  elseif #electrical_meter_eps > 0 then
+    profile_name = "electrical-meter"
+  end
 
+  if profile_name then
     device.log.info_with({ hub_logs = true }, string.format("Updating device profile to %s.", profile_name))
     device:try_update_metadata({ profile = profile_name })
   end
@@ -504,6 +515,9 @@ local function get_component_for_energy_reports(device, cumulative_import_or_exp
     if #get_endpoints_for_dt(device, BATTERY_STORAGE_DEVICE_TYPE_ID) > 0 then
       energyMeter_component = "importedEnergy"
       powerConsumption_component = "importedEnergy"
+    elseif #get_endpoints_for_dt(device, ELECTRICAL_METER_DEVICE_TYPE_ID) > 0 then
+      energyMeter_component = "importedEnergy"
+      powerConsumption_component = "importedEnergy"
     elseif #get_endpoints_for_dt(device, SOLAR_POWER_DEVICE_TYPE_ID) > 0 then
       energyMeter_component = "N/A" -- do not send cumulative import reports for solar power
     end
@@ -543,8 +557,11 @@ end
 local function active_power_handler(driver, device, ib, response)
   local battery_storage_eps = get_endpoints_for_dt(device, BATTERY_STORAGE_DEVICE_TYPE_ID) or {}
   local solar_power_eps = get_endpoints_for_dt(device, SOLAR_POWER_DEVICE_TYPE_ID) or {}
-  -- Consider only Solar Power / Battery Storage devices and sum up in case there are multiple endpoints.
-  if (tbl_contains(solar_power_eps, ib.endpoint_id) or tbl_contains(battery_storage_eps, ib.endpoint_id)) and ib.data.value then
+  local electrical_meter_eps = get_endpoints_for_dt(device, ELECTRICAL_METER_DEVICE_TYPE_ID) or {}
+  -- Consider only Solar Power / Battery Storage / Electrical Meter devices and sum up in case there are multiple endpoints.
+  if (tbl_contains(solar_power_eps, ib.endpoint_id) or
+      tbl_contains(battery_storage_eps, ib.endpoint_id) or
+      tbl_contains(electrical_meter_eps, ib.endpoint_id)) and ib.data.value then
     local endpoint_id = string.format(ib.endpoint_id)
     local active_power_map = device:get_field(TOTAL_ACTIVE_POWER) or {}
     local watt_value = ib.data.value / 1000
@@ -555,6 +572,22 @@ local function active_power_handler(driver, device, ib, response)
     if total_active_power ~= nil then
       device:emit_event_for_endpoint(ib.endpoint_id, capabilities.powerMeter.power({ value = total_active_power, unit = "W" }))
     end
+  end
+end
+
+local function rms_voltage_handler(driver, device, ib, response)
+  if ib.data.value then
+    -- Matter RMSVoltage is in mV, ST voltageMeasurement expects V
+    local voltage_v = ib.data.value / 1000
+    device:emit_event_for_endpoint(ib.endpoint_id, capabilities.voltageMeasurement.voltage({ value = voltage_v, unit = "V" }))
+  end
+end
+
+local function rms_current_handler(driver, device, ib, response)
+  if ib.data.value then
+    -- Matter RMSCurrent is in mA, ST currentMeasurement expects A
+    local current_a = ib.data.value / 1000
+    device:emit_event_for_endpoint(ib.endpoint_id, capabilities.currentMeasurement.current({ value = current_a, unit = "A" }))
   end
 end
 
@@ -667,6 +700,8 @@ matter_driver_template = {
       [clusters.ElectricalPowerMeasurement.ID] = {
         [clusters.ElectricalPowerMeasurement.attributes.PowerMode.ID] = power_mode_handler,
         [clusters.ElectricalPowerMeasurement.attributes.ActivePower.ID] = active_power_handler,
+        [clusters.ElectricalPowerMeasurement.attributes.RMSVoltage.ID] = rms_voltage_handler,
+        [clusters.ElectricalPowerMeasurement.attributes.RMSCurrent.ID] = rms_current_handler,
       },
       [clusters.EnergyEvseMode.ID] = {
         [clusters.EnergyEvseMode.attributes.SupportedModes.ID] = energy_evse_supported_modes_attr_handler,
@@ -717,6 +752,12 @@ matter_driver_template = {
     [capabilities.powerMeter.ID] = {
       clusters.ElectricalPowerMeasurement.attributes.ActivePower
     },
+    [capabilities.voltageMeasurement.ID] = {
+      clusters.ElectricalPowerMeasurement.attributes.RMSVoltage
+    },
+    [capabilities.currentMeasurement.ID] = {
+      clusters.ElectricalPowerMeasurement.attributes.RMSCurrent
+    },
     [capabilities.energyMeter.ID] = {
       clusters.ElectricalEnergyMeasurement.attributes.PeriodicEnergyExported
     },
@@ -746,6 +787,8 @@ matter_driver_template = {
     capabilities.powerConsumptionReport,
     capabilities.mode,
     capabilities.powerMeter,
+    capabilities.voltageMeasurement,
+    capabilities.currentMeasurement,
     capabilities.energyMeter,
     capabilities.battery,
     capabilities.chargingState
