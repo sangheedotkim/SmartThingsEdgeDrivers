@@ -759,7 +759,8 @@ matter_driver_template = {
       clusters.ElectricalPowerMeasurement.attributes.RMSCurrent
     },
     [capabilities.energyMeter.ID] = {
-      clusters.ElectricalEnergyMeasurement.attributes.PeriodicEnergyExported
+      clusters.ElectricalEnergyMeasurement.attributes.CumulativeEnergyImported,
+      clusters.ElectricalEnergyMeasurement.attributes.CumulativeEnergyExported
     },
     [capabilities.battery.ID] = {
       clusters.PowerSource.attributes.BatPercentRemaining
