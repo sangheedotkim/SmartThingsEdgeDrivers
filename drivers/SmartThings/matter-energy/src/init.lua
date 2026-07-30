@@ -530,7 +530,18 @@ local function energy_report_handler_factory(is_cumulative_report, cumulative_im
     if not ib.data then return
     elseif version.api < 11 then clusters.ElectricalEnergyMeasurement.types.EnergyMeasurementStruct:augment_type(ib.data) end
 
+    -- For Electrical Meter devices, only process energy from the Electrical Meter endpoint
+    -- to avoid double-counting with sub-sensor endpoints (e.g. household load, solar).
+    -- The Electrical Meter endpoint is a net meter whose value already accounts for
+    -- consumption minus generation. Solar Power and Battery Storage devices have no
+    -- Electrical Meter endpoint, so all their endpoints are processed (and summed).
+    local electrical_meter_eps = get_endpoints_for_dt(device, ELECTRICAL_METER_DEVICE_TYPE_ID) or {}
+    if #electrical_meter_eps > 0 and not tbl_contains(electrical_meter_eps, ib.endpoint_id) then
+      return
+    end
+
     local endpoint_id = string.format(ib.endpoint_id)
+
     local total_cumulative_energy = device:get_field(cumulative_import_or_export_field) or {}
     local energy_Wh = utils.round(ib.data.elements.energy.value / 1000) -- convert mWh to Wh
 
