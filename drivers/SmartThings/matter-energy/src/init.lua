@@ -576,7 +576,10 @@ local function active_power_handler(driver, device, ib, response)
 end
 
 local function rms_voltage_handler(driver, device, ib, response)
-  if ib.data.value then
+  local electrical_meter_eps = get_endpoints_for_dt(device, ELECTRICAL_METER_DEVICE_TYPE_ID) or {}
+  -- Only process voltage from the Electrical Meter endpoint to avoid overwriting
+  -- with values from other Electrical Sensor endpoints (e.g. household load, solar)
+  if tbl_contains(electrical_meter_eps, ib.endpoint_id) and ib.data.value then
     -- Matter RMSVoltage is in mV, ST voltageMeasurement expects V
     local voltage_v = ib.data.value / 1000
     device:emit_event_for_endpoint(ib.endpoint_id, capabilities.voltageMeasurement.voltage({ value = voltage_v, unit = "V" }))
@@ -584,12 +587,16 @@ local function rms_voltage_handler(driver, device, ib, response)
 end
 
 local function rms_current_handler(driver, device, ib, response)
-  if ib.data.value then
+  local electrical_meter_eps = get_endpoints_for_dt(device, ELECTRICAL_METER_DEVICE_TYPE_ID) or {}
+  -- Only process current from the Electrical Meter endpoint to avoid overwriting
+  -- with values from other Electrical Sensor endpoints (e.g. household load, solar)
+  if tbl_contains(electrical_meter_eps, ib.endpoint_id) and ib.data.value then
     -- Matter RMSCurrent is in mA, ST currentMeasurement expects A
     local current_a = ib.data.value / 1000
     device:emit_event_for_endpoint(ib.endpoint_id, capabilities.currentMeasurement.current({ value = current_a, unit = "A" }))
   end
 end
+
 
 local function battery_percent_remaining_attr_handler(driver, device, ib, response)
   if ib.data.value then
