@@ -15,3 +15,8 @@ matterGeneric:
     deviceTypes:
       - id: 0x0018 #Battery Storage
     deviceProfileName: battery-storage
+  - id: "matter/electrical-meter"
+    deviceLabel: Matter Electrical Meter
+    deviceTypes:
+      - id: 0x0514 #Electrical Meter
+    deviceProfileName: electrical-meter

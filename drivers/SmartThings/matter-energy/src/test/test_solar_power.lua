@@ -75,6 +75,8 @@ local function test_init()
   test.mock_device.add_test_device(mock_device)
   local cluster_subscribe_list = {
     clusters.ElectricalPowerMeasurement.attributes.ActivePower,
+    clusters.ElectricalEnergyMeasurement.attributes.CumulativeEnergyImported,
+    clusters.ElectricalEnergyMeasurement.attributes.CumulativeEnergyExported,
     clusters.ElectricalEnergyMeasurement.attributes.PeriodicEnergyExported,
     clusters.ElectricalEnergyMeasurement.attributes.PeriodicEnergyImported
   }

@@ -58,6 +58,7 @@ local EVSE_DEVICE_TYPE_ID = 0x050C
 local SOLAR_POWER_DEVICE_TYPE_ID = 0x0017
 local BATTERY_STORAGE_DEVICE_TYPE_ID = 0x0018
 local ELECTRICAL_SENSOR_DEVICE_TYPE_ID = 0x0510
+local ELECTRICAL_METER_DEVICE_TYPE_ID = 0x0514
 local DEVICE_ENERGY_MANAGEMENT_DEVICE_TYPE_ID = 0x050D
 
 local function get_endpoints_for_dt(device, device_type)
@@ -155,6 +156,46 @@ local function tbl_contains(array, value)
   return false
 end
 
+-- An Electrical Meter endpoint meters the energy imported and exported for billing purposes: it
+-- sits at the point of common coupling with the grid and is therefore the single source of truth
+-- for the device's import and export. Any further Electrical Sensor endpoint measures an individual
+-- circuit downstream of the meter, so the energy it reports has already been metered and adding it
+-- to the total would count the same energy twice. Reports from those endpoints are dropped, and only
+-- the meter endpoint is accumulated.
+local function ignore_energy_report_from_endpoint(device, endpoint_id)
+  local meter_eps = get_endpoints_for_dt(device, ELECTRICAL_METER_DEVICE_TYPE_ID)
+  return #meter_eps > 0 and not tbl_contains(meter_eps, endpoint_id)
+end
+
+-- Guards against a driver version that summed every Electrical Sensor endpoint having left those
+-- endpoints' energy in these maps. get_total() sums every key, so a leftover sub-sensor entry would
+-- double count forever. The energy report handler no longer writes those keys, so this is a no-op
+-- once run.
+local function prune_ignored_endpoint_energy(device)
+  if #get_endpoints_for_dt(device, ELECTRICAL_METER_DEVICE_TYPE_ID) == 0 then
+    return
+  end
+  for _, field in ipairs({ TOTAL_CUMULATIVE_ENERGY_IMPORTED, TOTAL_CUMULATIVE_ENERGY_EXPORTED }) do
+    local energy_map = device:get_field(field)
+    if energy_map then
+      local stale_endpoint_ids = {}
+      for endpoint_id in pairs(energy_map) do -- the energy maps are keyed by endpoint id strings
+        if ignore_energy_report_from_endpoint(device, tonumber(endpoint_id)) then
+          table.insert(stale_endpoint_ids, endpoint_id)
+        end
+      end
+      if #stale_endpoint_ids > 0 then
+        for _, endpoint_id in ipairs(stale_endpoint_ids) do
+          energy_map[endpoint_id] = nil
+        end
+        device.log.info_with({ hub_logs = true },
+          string.format("Removed stale sub-sensor endpoint energy from %s.", field))
+        device:set_field(field, energy_map, { persist = true })
+      end
+    end
+  end
+end
+
 local get_total = function(map)
   local total_value = 0
   if type(map) == "table" then
@@ -217,6 +258,7 @@ local BATTERY_CHARGING_STATE_MAP = {
 -- Lifecycle Handlers --
 local function device_init(driver, device)
   check_field_name_updates(device)
+  prune_ignored_endpoint_energy(device)
   device:subscribe()
   device:set_endpoint_to_component_fn(endpoint_to_component)
   device:set_component_to_endpoint_fn(component_to_endpoint)
@@ -237,7 +279,15 @@ local function device_init(driver, device)
       clusters.ElectricalEnergyMeasurement.ID,
       {feature_bitmap = clusters.ElectricalEnergyMeasurement.types.Feature.CUMULATIVE_ENERGY}
     )
-    if #cumulative_energy_eps == 0 then device:set_field(CUMULATIVE_REPORTS_NOT_SUPPORTED, true, {persist = false}) end
+    -- endpoints whose reports are discarded must not decide how the remaining ones are handled,
+    -- otherwise a cumulative capable sub-sensor would suppress the meter endpoint's periodic reports.
+    local reported_cumulative_energy_eps = {}
+    for _, ep in ipairs(cumulative_energy_eps) do
+      if not ignore_energy_report_from_endpoint(device, ep) then
+        table.insert(reported_cumulative_energy_eps, ep)
+      end
+    end
+    if #reported_cumulative_energy_eps == 0 then device:set_field(CUMULATIVE_REPORTS_NOT_SUPPORTED, true, {persist = false}) end
   end
 end
 
@@ -256,11 +306,14 @@ end
 
 local function do_configure(driver, device)
   local evse_eps = get_endpoints_for_dt(device, EVSE_DEVICE_TYPE_ID) or {}
+  local electrical_meter_eps = get_endpoints_for_dt(device, ELECTRICAL_METER_DEVICE_TYPE_ID) or {}
+  local profile_name = nil
+
   if #evse_eps > 0 then
     local power_meas_eps = embedded_cluster_utils.get_endpoints(device, clusters.ElectricalPowerMeasurement.ID) or {}
     local energy_meas_eps = embedded_cluster_utils.get_endpoints(device, clusters.ElectricalEnergyMeasurement.ID) or {}
     local device_energy_mgmt_eps = embedded_cluster_utils.get_endpoints(device, clusters.DeviceEnergyManagementMode) or {}
-    local profile_name = "evse"
+    profile_name = "evse"
 
     -- As per spec, at least one of the electrical energy measurement or electrical power measurement clusters are to be supported.
     if #energy_meas_eps > 0 then
@@ -273,7 +326,11 @@ local function do_configure(driver, device)
     if #device_energy_mgmt_eps > 0 then
       profile_name = profile_name .. "-energy-mgmt-mode"
     end
+  elseif #electrical_meter_eps > 0 then
+    profile_name = "electrical-meter"
+  end
 
+  if profile_name then
     device.log.info_with({ hub_logs = true }, string.format("Updating device profile to %s.", profile_name))
     device:try_update_metadata({ profile = profile_name })
   end
@@ -504,6 +561,9 @@ local function get_component_for_energy_reports(device, cumulative_import_or_exp
     if #get_endpoints_for_dt(device, BATTERY_STORAGE_DEVICE_TYPE_ID) > 0 then
       energyMeter_component = "importedEnergy"
       powerConsumption_component = "importedEnergy"
+    elseif #get_endpoints_for_dt(device, ELECTRICAL_METER_DEVICE_TYPE_ID) > 0 then
+      energyMeter_component = "importedEnergy"
+      powerConsumption_component = "importedEnergy"
     elseif #get_endpoints_for_dt(device, SOLAR_POWER_DEVICE_TYPE_ID) > 0 then
       energyMeter_component = "N/A" -- do not send cumulative import reports for solar power
     end
@@ -514,6 +574,7 @@ end
 local function energy_report_handler_factory(is_cumulative_report, cumulative_import_or_export_field)
   return function(driver, device, ib, response)
     if not ib.data then return
+    elseif ignore_energy_report_from_endpoint(device, ib.endpoint_id) then return
     elseif version.api < 11 then clusters.ElectricalEnergyMeasurement.types.EnergyMeasurementStruct:augment_type(ib.data) end
 
     local endpoint_id = string.format(ib.endpoint_id)
@@ -540,11 +601,33 @@ local function energy_report_handler_factory(is_cumulative_report, cumulative_im
   end
 end
 
+-- Only the Electrical Meter endpoint measures the mains supply of the device as a whole, so
+-- readings from the sub-sensor endpoints, which measure individual circuits, are ignored.
+local function rms_measurement_handler(attribute, unit)
+  return function(driver, device, ib, response)
+    local electrical_meter_eps = get_endpoints_for_dt(device, ELECTRICAL_METER_DEVICE_TYPE_ID) or {}
+    if not tbl_contains(electrical_meter_eps, ib.endpoint_id) or not ib.data.value then
+      return
+    end
+    device:emit_event_for_endpoint(ib.endpoint_id, attribute({ value = ib.data.value / 1000, unit = unit }))
+  end
+end
+
 local function active_power_handler(driver, device, ib, response)
-  local battery_storage_eps = get_endpoints_for_dt(device, BATTERY_STORAGE_DEVICE_TYPE_ID) or {}
-  local solar_power_eps = get_endpoints_for_dt(device, SOLAR_POWER_DEVICE_TYPE_ID) or {}
-  -- Consider only Solar Power / Battery Storage devices and sum up in case there are multiple endpoints.
-  if (tbl_contains(solar_power_eps, ib.endpoint_id) or tbl_contains(battery_storage_eps, ib.endpoint_id)) and ib.data.value then
+  local electrical_meter_eps = get_endpoints_for_dt(device, ELECTRICAL_METER_DEVICE_TYPE_ID) or {}
+  local report_from_endpoint
+  if #electrical_meter_eps > 0 then
+    -- The Electrical Meter endpoint measures the grid connection point as a whole, so the power
+    -- drawn by the circuits the sub-sensor endpoints measure is already included in its reading.
+    report_from_endpoint = tbl_contains(electrical_meter_eps, ib.endpoint_id)
+  else
+    local battery_storage_eps = get_endpoints_for_dt(device, BATTERY_STORAGE_DEVICE_TYPE_ID) or {}
+    local solar_power_eps = get_endpoints_for_dt(device, SOLAR_POWER_DEVICE_TYPE_ID) or {}
+    -- Consider only Solar Power / Battery Storage devices and sum up in case there are multiple endpoints.
+    report_from_endpoint = tbl_contains(solar_power_eps, ib.endpoint_id) or
+      tbl_contains(battery_storage_eps, ib.endpoint_id)
+  end
+  if report_from_endpoint and ib.data.value then
     local endpoint_id = string.format(ib.endpoint_id)
     local active_power_map = device:get_field(TOTAL_ACTIVE_POWER) or {}
     local watt_value = ib.data.value / 1000
@@ -667,6 +750,10 @@ matter_driver_template = {
       [clusters.ElectricalPowerMeasurement.ID] = {
         [clusters.ElectricalPowerMeasurement.attributes.PowerMode.ID] = power_mode_handler,
         [clusters.ElectricalPowerMeasurement.attributes.ActivePower.ID] = active_power_handler,
+        [clusters.ElectricalPowerMeasurement.attributes.RMSVoltage.ID] = rms_measurement_handler(
+          capabilities.voltageMeasurement.voltage, "V"),
+        [clusters.ElectricalPowerMeasurement.attributes.RMSCurrent.ID] = rms_measurement_handler(
+          capabilities.currentMeasurement.current, "A"),
       },
       [clusters.EnergyEvseMode.ID] = {
         [clusters.EnergyEvseMode.attributes.SupportedModes.ID] = energy_evse_supported_modes_attr_handler,
@@ -705,6 +792,8 @@ matter_driver_template = {
       clusters.ElectricalPowerMeasurement.attributes.PowerMode,
     },
     [capabilities.powerConsumptionReport.ID] = {
+      clusters.ElectricalEnergyMeasurement.attributes.CumulativeEnergyImported,
+      clusters.ElectricalEnergyMeasurement.attributes.CumulativeEnergyExported,
       clusters.ElectricalEnergyMeasurement.attributes.PeriodicEnergyImported,
       clusters.ElectricalEnergyMeasurement.attributes.PeriodicEnergyExported,
     },
@@ -718,7 +807,16 @@ matter_driver_template = {
       clusters.ElectricalPowerMeasurement.attributes.ActivePower
     },
     [capabilities.energyMeter.ID] = {
+      clusters.ElectricalEnergyMeasurement.attributes.CumulativeEnergyImported,
+      clusters.ElectricalEnergyMeasurement.attributes.CumulativeEnergyExported,
+      clusters.ElectricalEnergyMeasurement.attributes.PeriodicEnergyImported,
       clusters.ElectricalEnergyMeasurement.attributes.PeriodicEnergyExported
+    },
+    [capabilities.voltageMeasurement.ID] = {
+      clusters.ElectricalPowerMeasurement.attributes.RMSVoltage
+    },
+    [capabilities.currentMeasurement.ID] = {
+      clusters.ElectricalPowerMeasurement.attributes.RMSCurrent
     },
     [capabilities.battery.ID] = {
       clusters.PowerSource.attributes.BatPercentRemaining
@@ -747,6 +845,8 @@ matter_driver_template = {
     capabilities.mode,
     capabilities.powerMeter,
     capabilities.energyMeter,
+    capabilities.voltageMeasurement,
+    capabilities.currentMeasurement,
     capabilities.battery,
     capabilities.chargingState
   },
