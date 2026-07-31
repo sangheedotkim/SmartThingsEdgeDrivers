@@ -530,15 +530,33 @@ local function energy_report_handler_factory(is_cumulative_report, cumulative_im
     if not ib.data then return
     elseif version.api < 11 then clusters.ElectricalEnergyMeasurement.types.EnergyMeasurementStruct:augment_type(ib.data) end
 
-    -- For Electrical Meter devices, only process energy from the Electrical Meter endpoint
-    -- to avoid double-counting with sub-sensor endpoints (e.g. household load, solar).
-    -- The Electrical Meter endpoint is a net meter whose value already accounts for
-    -- consumption minus generation. Solar Power and Battery Storage devices have no
-    -- Electrical Meter endpoint, so all their endpoints are processed (and summed).
+    -- For Electrical Meter devices, prefer sub-sensor endpoints (0x0510 only) over the
+    -- Electrical Meter endpoint (0x0514) for energy reports. The Electrical Meter endpoint
+    -- is a net meter whose value already accounts for consumption minus generation, so using
+    -- it would not reflect the true import/export totals. Sub-sensor endpoints report pure
+    -- import or export values independently.
+    -- If no sub-sensor endpoints exist (Config A: single endpoint with both 0x0514+0x0510),
+    -- fall back to using the Electrical Meter endpoint.
     local electrical_meter_eps = get_endpoints_for_dt(device, ELECTRICAL_METER_DEVICE_TYPE_ID) or {}
-    if #electrical_meter_eps > 0 and not tbl_contains(electrical_meter_eps, ib.endpoint_id) then
-      return
+    if #electrical_meter_eps > 0 then
+      local non_meter_sensor_eps = {}
+      for _, ep in ipairs(device.endpoints) do
+        local has_meter_dt = false
+        local has_sensor_dt = false
+        for _, dt in ipairs(ep.device_types) do
+          if dt.device_type_id == ELECTRICAL_METER_DEVICE_TYPE_ID then has_meter_dt = true end
+          if dt.device_type_id == ELECTRICAL_SENSOR_DEVICE_TYPE_ID then has_sensor_dt = true end
+        end
+        if has_sensor_dt and not has_meter_dt then
+          table.insert(non_meter_sensor_eps, ep.endpoint_id)
+        end
+      end
+      -- If sub-sensor endpoints exist, skip the Electrical Meter (net) endpoint
+      if #non_meter_sensor_eps > 0 and tbl_contains(electrical_meter_eps, ib.endpoint_id) then
+        return
+      end
     end
+
 
     local endpoint_id = string.format(ib.endpoint_id)
 
