@@ -219,8 +219,52 @@ local BATTERY_CHARGING_STATE_MAP = {
 }
 
 -- Lifecycle Handlers --
+local function cleanup_stale_meter_ep_energy(device)
+  -- For Electrical Meter devices with sub-sensor endpoints (0x0510 only), the meter
+  -- endpoint (0x0514) is skipped in energy_report_handler_factory. However, values
+  -- persisted by a previous driver version (before the filter was added) may still
+  -- exist in the energy maps. Clear them once on startup so get_total() doesn't
+  -- include stale meter EP values.
+  local electrical_meter_eps = get_endpoints_for_dt(device, ELECTRICAL_METER_DEVICE_TYPE_ID) or {}
+  if #electrical_meter_eps == 0 then return end
+
+  -- Check if sub-sensor endpoints (0x0510 only, no 0x0514) exist
+  local has_non_meter_sensor_ep = false
+  for _, ep in ipairs(device.endpoints) do
+    local has_meter_dt = false
+    local has_sensor_dt = false
+    for _, dt in ipairs(ep.device_types) do
+      if dt.device_type_id == ELECTRICAL_METER_DEVICE_TYPE_ID then has_meter_dt = true end
+      if dt.device_type_id == ELECTRICAL_SENSOR_DEVICE_TYPE_ID then has_sensor_dt = true end
+    end
+    if has_sensor_dt and not has_meter_dt then
+      has_non_meter_sensor_ep = true
+      break
+    end
+  end
+
+  if not has_non_meter_sensor_ep then return end
+
+  -- Remove meter EP entries from both import and export energy maps
+  for _, field in ipairs({TOTAL_CUMULATIVE_ENERGY_IMPORTED, TOTAL_CUMULATIVE_ENERGY_EXPORTED}) do
+    local energy_map = device:get_field(field) or {}
+    local changed = false
+    for _, ep_id in ipairs(electrical_meter_eps) do
+      local key = string.format(ep_id)
+      if energy_map[key] ~= nil then
+        energy_map[key] = nil
+        changed = true
+      end
+    end
+    if changed then
+      device:set_field(field, energy_map, { persist = true })
+    end
+  end
+end
+
 local function device_init(driver, device)
   check_field_name_updates(device)
+  cleanup_stale_meter_ep_energy(device)
   device:subscribe()
   device:set_endpoint_to_component_fn(endpoint_to_component)
   device:set_component_to_endpoint_fn(component_to_endpoint)
@@ -244,6 +288,7 @@ local function device_init(driver, device)
     if #cumulative_energy_eps == 0 then device:set_field(CUMULATIVE_REPORTS_NOT_SUPPORTED, true, {persist = false}) end
   end
 end
+
 
 local function device_added(driver, device)
   local evse_eps = get_endpoints_for_dt(device, EVSE_DEVICE_TYPE_ID) or {}
@@ -551,10 +596,14 @@ local function energy_report_handler_factory(is_cumulative_report, cumulative_im
           table.insert(non_meter_sensor_eps, ep.endpoint_id)
         end
       end
-      -- If sub-sensor endpoints exist, skip the Electrical Meter (net) endpoint
+      -- If sub-sensor endpoints exist, skip the Electrical Meter (net) endpoint.
+      -- Stale meter EP values from a previous driver version are cleaned up once
+      -- in device_init via cleanup_stale_meter_ep_energy().
       if #non_meter_sensor_eps > 0 and tbl_contains(electrical_meter_eps, ib.endpoint_id) then
         return
       end
+
+
     end
 
 
@@ -580,8 +629,22 @@ local function energy_report_handler_factory(is_cumulative_report, cumulative_im
     if device.profile.components[powerConsumption_component] and device:supports_capability(capabilities.powerConsumptionReport) then
       report_power_consumption_to_st_energy(device, device.profile.components[powerConsumption_component], summed_total_energy)
     end
+
+    -- For Electrical Meter devices, emit net energy (imported - exported) to the main component.
+    -- This shows the actual consumption on the main tile: total imported minus total exported.
+    -- In Config A (single EP), the meter EP value is used directly for both import and export.
+    -- In Config C (sub-sensors), sub-sensor values are summed independently.
+    if #electrical_meter_eps > 0 then
+      local total_imported = get_total(device:get_field(TOTAL_CUMULATIVE_ENERGY_IMPORTED) or {})
+      local total_exported = get_total(device:get_field(TOTAL_CUMULATIVE_ENERGY_EXPORTED) or {})
+      local net_energy = math.max(total_imported - total_exported, 0)
+      if device.profile.components["main"] and device:supports_capability(capabilities.energyMeter) then
+        device:emit_component_event(device.profile.components["main"], capabilities.energyMeter.energy({value = net_energy, unit = "Wh"}))
+      end
+    end
   end
 end
+
 
 local function active_power_handler(driver, device, ib, response)
   local battery_storage_eps = get_endpoints_for_dt(device, BATTERY_STORAGE_DEVICE_TYPE_ID) or {}

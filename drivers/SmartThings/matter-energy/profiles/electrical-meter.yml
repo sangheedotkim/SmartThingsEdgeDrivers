@@ -4,6 +4,8 @@ components:
   capabilities:
   - id: powerMeter
     version: 1
+  - id: energyMeter
+    version: 1
   - id: voltageMeasurement
     version: 1
   - id: currentMeasurement
@@ -14,6 +16,7 @@ components:
     version: 1
   categories:
   - name: PowerMeasurementSensor
+
 - id: importedEnergy
   label: Imported Energy
   capabilities:
@@ -27,8 +30,6 @@ components:
   label: Exported Energy
   capabilities:
   - id: energyMeter
-    version: 1
-  - id: powerConsumptionReport
     version: 1
   - id: refresh
     version: 1
