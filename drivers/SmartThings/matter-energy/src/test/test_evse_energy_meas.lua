@@ -88,6 +88,8 @@ local function test_init()
     clusters.EnergyEvse.attributes.SessionEnergyCharged,
     clusters.EnergyEvseMode.attributes.SupportedModes,
     clusters.EnergyEvseMode.attributes.CurrentMode,
+    clusters.ElectricalEnergyMeasurement.attributes.CumulativeEnergyImported,
+    clusters.ElectricalEnergyMeasurement.attributes.CumulativeEnergyExported,
     clusters.ElectricalEnergyMeasurement.attributes.PeriodicEnergyImported,
     clusters.ElectricalEnergyMeasurement.attributes.PeriodicEnergyExported,
   }
