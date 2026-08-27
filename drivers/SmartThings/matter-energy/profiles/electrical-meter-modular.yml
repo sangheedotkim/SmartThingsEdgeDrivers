@@ -1,0 +1,36 @@
+name: electrical-meter-modular
+components:
+- id: main
+  capabilities:
+  - id: powerMeter
+    version: 1
+  - id: voltageMeasurement
+    version: 1
+  - id: currentMeasurement
+    version: 1
+  - id: firmwareUpdate
+    version: 1
+  - id: refresh
+    version: 1
+  categories:
+  - name: PowerMeasurementSensor
+- id: importedEnergy
+  label: Imported Energy
+  optional: true
+  capabilities:
+  - id: energyMeter
+    version: 1
+    optional: true
+  - id: powerConsumptionReport
+    version: 1
+    optional: true
+- id: exportedEnergy
+  label: Exported Energy
+  optional: true
+  capabilities:
+  - id: energyMeter
+    version: 1
+    optional: true
+  - id: powerConsumptionReport
+    version: 1
+    optional: true

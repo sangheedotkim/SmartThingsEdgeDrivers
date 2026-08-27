@@ -285,8 +285,19 @@ local function device_added(driver, device)
   end
 end
 
+-- Returns whether the given ElectricalEnergyMeasurement feature is supported on an endpoint.
+local function endpoint_supports_energy_feature(device, endpoint_id, feature)
+  local eps = embedded_cluster_utils.get_endpoints(
+    device,
+    clusters.ElectricalEnergyMeasurement.ID,
+    {feature_bitmap = feature}
+  ) or {}
+  return tbl_contains(eps, endpoint_id)
+end
+
 local function do_configure(driver, device)
   local evse_eps = get_endpoints_for_dt(device, EVSE_DEVICE_TYPE_ID) or {}
+  local electrical_meter_ep = get_primary_electrical_meter_endpoint(device)
   if #evse_eps > 0 then
     local power_meas_eps = embedded_cluster_utils.get_endpoints(device, clusters.ElectricalPowerMeasurement.ID) or {}
     local energy_meas_eps = embedded_cluster_utils.get_endpoints(device, clusters.ElectricalEnergyMeasurement.ID) or {}
@@ -307,6 +318,33 @@ local function do_configure(driver, device)
 
     device.log.info_with({ hub_logs = true }, string.format("Updating device profile to %s.", profile_name))
     device:try_update_metadata({ profile = profile_name })
+  elseif electrical_meter_ep then
+    local imported = endpoint_supports_energy_feature(device, electrical_meter_ep,
+      clusters.ElectricalEnergyMeasurement.types.Feature.IMPORTED_ENERGY)
+    local exported = endpoint_supports_energy_feature(device, electrical_meter_ep,
+      clusters.ElectricalEnergyMeasurement.types.Feature.EXPORTED_ENERGY)
+
+    -- As per spec, at least one of the imported energy or exported energy features is to be
+    -- supported, so a component is only dropped when its direction is explicitly unsupported.
+    -- A non-conformant meter advertising neither keeps both components.
+    if not imported and not exported then imported, exported = true, true end
+
+    if version.api >= 15 and version.rpc >= 9 then
+      local energy_caps = { capabilities.energyMeter.ID, capabilities.powerConsumptionReport.ID }
+      local optional_component_capabilities = {}
+      if imported then
+        table.insert(optional_component_capabilities, { "importedEnergy", energy_caps })
+      end
+      if exported then
+        table.insert(optional_component_capabilities, { "exportedEnergy", energy_caps })
+      end
+      device:try_update_metadata({
+        profile = "electrical-meter-modular",
+        optional_component_capabilities = optional_component_capabilities
+      })
+    else
+      device:try_update_metadata({ profile = "electrical-meter" })
+    end
   end
 end
 

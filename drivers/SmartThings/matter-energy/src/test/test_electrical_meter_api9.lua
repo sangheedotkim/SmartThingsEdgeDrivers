@@ -20,10 +20,11 @@ local version = require "version"
 
 -- Below API 11 the driver swaps ElectricalPowerMeasurement and ElectricalEnergyMeasurement for its
 -- own definitions, so the paths the Electrical Meter depends on must be covered against those as
--- well: the RMSVoltage and RMSCurrent attributes added for this device type, and the
--- EnergyMeasurementStruct augment_type call that only runs on these older API versions.
--- Referencing an attribute the embedded cluster does not define would otherwise fail at driver
--- startup only, and only on a hub old enough that the rest of the suite never reaches it.
+-- well: the RMSVoltage and RMSCurrent attributes added for this device type, the feature map lookup
+-- that picks the profile, and the EnergyMeasurementStruct augment_type call that only runs on these
+-- older API versions. Referencing an attribute the embedded cluster does not define would otherwise
+-- fail at driver startup only, and only on a hub old enough that the rest of the suite never
+-- reaches it.
 version.api = 9
 
 clusters.ElectricalPowerMeasurement = require "ElectricalPowerMeasurement"
@@ -103,7 +104,9 @@ local function test_init()
   test.socket.device_lifecycle:__queue_receive({ mock_device.id, "init" })
   test.socket.matter:__expect_send({ mock_device.id, subscribe_request })
 
+  -- the feature map is read through the embedded cluster's are_features_supported
   test.socket.device_lifecycle:__queue_receive({ mock_device.id, "doConfigure" })
+  mock_device:expect_metadata_update({ profile = "electrical-meter" })
   mock_device:expect_metadata_update({ provisioning_state = "PROVISIONED" })
 end
 test.set_test_init_function(test_init)

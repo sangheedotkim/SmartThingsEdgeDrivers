@@ -163,6 +163,7 @@ local function test_init()
   test.socket.matter:__expect_send({ mock_device.id, subscribe_request })
 
   test.socket.device_lifecycle:__queue_receive({ mock_device.id, "doConfigure" })
+  mock_device:expect_metadata_update({ profile = "electrical-meter-modular", optional_component_capabilities = { {"importedEnergy", {"energyMeter", "powerConsumptionReport"}}, {"exportedEnergy", {"energyMeter", "powerConsumptionReport"}} } })
   mock_device:expect_metadata_update({ provisioning_state = "PROVISIONED" })
 end
 test.set_test_init_function(test_init)
@@ -181,6 +182,7 @@ local function test_init_periodic_only_meter()
   test.socket.matter:__expect_send({ mock_device_periodic_only_meter.id, subscribe_request })
 
   test.socket.device_lifecycle:__queue_receive({ mock_device_periodic_only_meter.id, "doConfigure" })
+  mock_device_periodic_only_meter:expect_metadata_update({ profile = "electrical-meter-modular", optional_component_capabilities = { {"importedEnergy", {"energyMeter", "powerConsumptionReport"}}, {"exportedEnergy", {"energyMeter", "powerConsumptionReport"}} } })
   mock_device_periodic_only_meter:expect_metadata_update({ provisioning_state = "PROVISIONED" })
 end
 
